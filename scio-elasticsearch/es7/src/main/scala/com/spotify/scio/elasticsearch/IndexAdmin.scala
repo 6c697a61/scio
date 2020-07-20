@@ -18,10 +18,17 @@
 package com.spotify.scio.elasticsearch
 
 import org.apache.http.HttpHost
+import org.elasticsearch.action.admin.indices.alias.IndicesAliasesRequest
+import org.elasticsearch.action.admin.indices.alias.IndicesAliasesRequest.AliasActions
+import org.elasticsearch.action.admin.indices.alias.get.GetAliasesRequest
+import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequest
+import org.elasticsearch.action.support.master.AcknowledgedResponse
 import org.elasticsearch.client._
-import org.elasticsearch.client.indices.{CreateIndexRequest, CreateIndexResponse}
+import org.elasticsearch.client.indices.{CreateIndexRequest, CreateIndexResponse, GetIndexRequest}
+import org.elasticsearch.common.unit.TimeValue
 import org.elasticsearch.common.xcontent.XContentType
 
+import scala.collection.JavaConverters._
 import scala.util.Try
 
 object IndexAdmin {
@@ -78,4 +85,92 @@ object IndexAdmin {
       new CreateIndexRequest(index).source(mappingSource, XContentType.JSON),
       RequestOptions.DEFAULT
     )
+
+  def indexExists(nodes: Iterable[HttpHost], indexName: String): Try[Boolean] = {
+    val esOptions = ElasticsearchOptions(nodes.toSeq)
+    indicesClient(esOptions)(client =>
+      client.exists(new GetIndexRequest(indexName), RequestOptions.DEFAULT)
+    )
+  }
+
+  def indexExists(esOptions: ElasticsearchOptions, indexName: String): Try[Boolean] =
+    indicesClient(esOptions)(client =>
+      client.exists(new GetIndexRequest(indexName), RequestOptions.DEFAULT)
+    )
+
+  def indexExists(indexName: String, client: IndicesClient): Boolean =
+    client.exists(new GetIndexRequest(indexName), RequestOptions.DEFAULT)
+
+  def deleteIndex(nodes: Iterable[HttpHost], indexName: String): Try[AcknowledgedResponse] = {
+    val request = new DeleteIndexRequest(indexName).timeout(TimeValue.timeValueSeconds(30))
+    val esOptions = ElasticsearchOptions(nodes.toSeq)
+    indicesClient(esOptions)(client => client.delete(request, RequestOptions.DEFAULT))
+  }
+
+  def deleteIndex(esOptions: ElasticsearchOptions, indexName: String): Try[AcknowledgedResponse] = {
+    val request = new DeleteIndexRequest(indexName).timeout(TimeValue.timeValueSeconds(30))
+    indicesClient(esOptions)(client => client.delete(request, RequestOptions.DEFAULT))
+  }
+
+  def deleteIndex(indexName: String, client: IndicesClient): AcknowledgedResponse = {
+    val request = new DeleteIndexRequest(indexName).timeout(TimeValue.timeValueSeconds(30))
+    client.delete(request, RequestOptions.DEFAULT)
+  }
+
+  /** Assigns alias to the index and unless removeExisting is set to false, removes alias from
+   * all other indices it was assigned to */
+  def updateAlias(
+    nodes: Iterable[HttpHost],
+    index: String,
+    alias: String,
+    removeExisting: Boolean = true
+  ): Try[AcknowledgedResponse] = {
+    val esOptions = ElasticsearchOptions(nodes.toSeq)
+    updateAlias(esOptions, index, alias, removeExisting)
+  }
+
+  /** Assigns alias to the index and unless removeExisting is set to false, removes alias from
+   * all other indices it was assigned to */
+  def updateAlias(
+    esOptions: ElasticsearchOptions,
+    index: String,
+    alias: String,
+    removeExisting: Boolean = true
+  ): Try[AcknowledgedResponse] = indicesClient(esOptions) { client =>
+    updateAlias(index, alias, removeExisting, client)
+  }
+
+  /** Assigns alias to the index and unless removeExisting is set to false, removes alias from
+   * all other indices it was assigned to */
+  def updateAlias(
+    index: String,
+    alias: String,
+    removeExisting: Boolean = true,
+    client: IndicesClient
+  ): AcknowledgedResponse = {
+    val getAliasesResponse =
+      client.getAlias(new GetAliasesRequest(alias), RequestOptions.DEFAULT)
+
+    val request = new IndicesAliasesRequest()
+      .addAliasAction(
+        new AliasActions(AliasActions.Type.ADD)
+          .index(index)
+          .alias(alias)
+      )
+
+    if (removeExisting) {
+      val indexAliacesToRemove =
+        getAliasesResponse.getAliases.keySet().asScala.filterNot(_ == index)
+
+      indexAliacesToRemove.foreach(indexName =>
+        request.addAliasAction(
+          new AliasActions(AliasActions.Type.REMOVE)
+            .index(indexName)
+            .alias(alias)
+        )
+      )
+    }
+
+    client.updateAliases(request, RequestOptions.DEFAULT);
+  }
 }
